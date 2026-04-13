@@ -28,6 +28,25 @@ class MultimodalBiasAnalyzer:
                 "negative": ["angry", "aggressive", "criminal", "lazy", "stupid"]
             }
         }
+
+    @staticmethod
+    def _to_python_types(obj):
+        """Convert numpy types to Python-native types for JSON serialization."""
+        if isinstance(obj, dict):
+            return {
+                key: MultimodalBiasAnalyzer._to_python_types(value)
+                for key, value in obj.items()
+            }
+        elif isinstance(obj, (list, tuple)):
+            return [MultimodalBiasAnalyzer._to_python_types(item) for item in obj]
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        else:
+            return obj
     
     def analyze_image_caption_alignment(
         self,
@@ -302,7 +321,7 @@ class MultimodalBiasAnalyzer:
             float(gap_analysis["visual_semantic_bias_detected"]) * 0.25
         )
         
-        return {
+        return self._to_python_types({
             "alignment_analysis": alignment_analysis,
             "representation_analysis": representation_analysis,
             "attribution_analysis": attribution_analysis,
@@ -310,7 +329,7 @@ class MultimodalBiasAnalyzer:
             "overall_multimodal_bias_score": overall_bias_score,
             "bias_level": self._score_to_bias_level(overall_bias_score),
             "total_pairs_analyzed": len(image_captions)
-        }
+        })
     
     def _detect_stereotype(self, text: str) -> float:
         """

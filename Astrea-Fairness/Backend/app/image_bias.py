@@ -13,51 +13,6 @@ import numpy as np
 from typing import Dict, List, Tuple
 import warnings
 
-"""Removed all configuration dictionary; thresholds are now hard-coded
-as class constants above.  This variable was unused after refactoring."""
-    },
-    "SKIN_TONE": {
-        "skin_tone_categories": ["very_light", "light", "medium", "dark", "very_dark"],
-        "luminance_weights": {"r": 0.299, "g": 0.587, "b": 0.114},
-        "very_light_threshold": 0.8,
-        "light_threshold": 0.65,
-        "medium_threshold": 0.5,
-        "dark_threshold": 0.35,
-        "minimum_tone_diversity": 0.6,
-        "critical_tone_concentration": 0.8,
-    },
-    "BIAS_SCORING": {
-        "representation_weight": 0.15,
-        "feature_bias_weight": 0.12,
-        "color_bias_weight": 0.10,
-        "race_bias_weight": 0.15,
-        "age_bias_weight": 0.10,
-        "gender_bias_weight": 0.12,
-        "skin_tone_bias_weight": 0.10,
-        "pose_bias_weight": 0.08,
-        "background_bias_weight": 0.05,
-        "clothing_bias_weight": 0.02,
-        "emotion_bias_weight": 0.01,
-    },
-    "BIAS_LEVELS": {
-        "low_threshold": 0.2,
-        "moderate_threshold": 0.5,
-        "high_threshold": 0.8,
-        "critical_threshold": 1.0,
-        "weight_critical": 3.0,
-        "weight_moderate": 2.0,
-        "weight_minor": 1.0,
-    },
-    "VALIDATION": {
-        "minimum_images_required": 4,
-        "maximum_images_allowed": 10000,
-        "minimum_demographics": 1,
-        "maximum_demographics": 50,
-        "validate_image_dimensions": True,
-        "require_3_channels": True,
-    }
-}
-
 
 class ImageBiasAnalyzer:
     """
@@ -101,8 +56,10 @@ class ImageBiasAnalyzer:
     EDGE_STRENGTH_YOUNG_ADULT = 5
     EDGE_STRENGTH_ADULT = 10
     MINIMUM_AGE_GROUPS = 3
-    GENDER_CATEGORIES = ["male", "female", "non_binary"]
+    GENDER_CATEGORIES = ["male", "female", "non_binary", "unknown"]
     TEXTURE_VARIANCE_FEMALE_THRESHOLD = 300
+    GENDER_BRIGHTNESS_FEMALE_MIN = 95
+    GENDER_BRIGHTNESS_FEMALE_MAX = 185
     GENDER_DISP_THRESHOLD = 1.5
     GENDER_CRITICAL_THRESHOLD = 2.5
     GENDER_BALANCED_RANGE = [0.4, 0.6]
@@ -539,58 +496,101 @@ class ImageBiasAnalyzer:
     ) -> Dict:
         """
         Detect and analyze gender representation in images.
-        
-        Uses class constants (GENDER_*).
-        
-        Args:
-            images: List of preprocessed images
-            demographic_groups: List of demographic labels for each image
-        
-        Returns:
-            Dictionary with gender representation metrics
+
+        Priority:
+        1. If demographic_groups already contain gender labels, use them directly.
+        2. Otherwise fall back to a conservative image heuristic.
+        3. If the heuristic is not confident, return "unknown" rather than forcing
+           a male/female prediction.
+
+        This keeps the demo implementation from incorrectly classifying female
+        examples as male simply because the image variance is high.
         """
-        # use class constants for thresholds
         gender_distribution = {}
         gender_color_profiles = {}
-        
+        label_source_counts = {"provided_label": 0, "heuristic": 0, "unknown": 0}
+
+        gender_aliases = {
+            "male": "male",
+            "man": "male",
+            "boy": "male",
+            "female": "female",
+            "woman": "female",
+            "girl": "female",
+            "non_binary": "non_binary",
+            "non-binary": "non_binary",
+            "nonbinary": "non_binary",
+            "nb": "non_binary",
+        }
+
         for i, group in enumerate(demographic_groups):
             img = images[i]
-            if len(img.shape) == 3 and img.shape[2] == 3:
-                # Simulated gender detection based on color/texture
-                # In production: use face detection + gender classification models
-                texture_variance = np.var(img)
-                avg_brightness = np.mean(img)
-                
-                # Simple heuristic: lower variance might indicate makeup/smoother skin
-                if texture_variance < ImageBiasAnalyzer.TEXTURE_VARIANCE_FEMALE_THRESHOLD:
+            pred_gender = None
+            avg_brightness = 0.0
+
+            normalized_group = str(group).strip().lower().replace(" ", "_")
+            if normalized_group in gender_aliases:
+                pred_gender = gender_aliases[normalized_group]
+                label_source_counts["provided_label"] += 1
+
+            elif len(img.shape) == 3 and img.shape[2] == 3:
+                # Conservative fallback heuristic for demo purposes only.
+                texture_variance = float(np.var(img))
+                avg_brightness = float(np.mean(img))
+
+                likely_female = (
+                    texture_variance < ImageBiasAnalyzer.TEXTURE_VARIANCE_FEMALE_THRESHOLD
+                    and ImageBiasAnalyzer.GENDER_BRIGHTNESS_FEMALE_MIN
+                    <= avg_brightness
+                    <= ImageBiasAnalyzer.GENDER_BRIGHTNESS_FEMALE_MAX
+                )
+
+                if likely_female:
                     pred_gender = "female"
+                    label_source_counts["heuristic"] += 1
                 else:
-                    pred_gender = "male"
-                
-                if pred_gender not in gender_distribution:
-                    gender_distribution[pred_gender] = 0
-                    gender_color_profiles[pred_gender] = {"brightness": []}
-                
-                gender_distribution[pred_gender] += 1
-                gender_color_profiles[pred_gender]["brightness"].append(avg_brightness)
-        
+                    pred_gender = "unknown"
+                    label_source_counts["unknown"] += 1
+            else:
+                pred_gender = "unknown"
+                label_source_counts["unknown"] += 1
+
+            if pred_gender not in gender_distribution:
+                gender_distribution[pred_gender] = 0
+                gender_color_profiles[pred_gender] = {"brightness": []}
+
+            gender_distribution[pred_gender] += 1
+            gender_color_profiles[pred_gender]["brightness"].append(avg_brightness)
+
         total = sum(gender_distribution.values())
         gender_percentages = {
             gender: (count / total) * 100
             for gender, count in gender_distribution.items()
         } if total > 0 else {}
-        
-        percentages = list(gender_percentages.values())
-        gender_disparity = max(percentages) / min(percentages) if len(percentages) > 1 and min(percentages) > 0 else 1.0
-        
+
+        comparable_percentages = [
+            pct for gender, pct in gender_percentages.items() if gender != "unknown"
+        ]
+        gender_disparity = (
+            max(comparable_percentages) / min(comparable_percentages)
+            if len(comparable_percentages) > 1 and min(comparable_percentages) > 0
+            else 1.0
+        )
+
         return {
             "gender_distribution": gender_distribution,
             "gender_percentages": gender_percentages,
+            "gender_categories": ImageBiasAnalyzer.GENDER_CATEGORIES,
             "gender_disparity_ratio": gender_disparity,
             "gender_disparity_threshold": ImageBiasAnalyzer.GENDER_DISP_THRESHOLD,
             "gender_critical_threshold": ImageBiasAnalyzer.GENDER_CRITICAL_THRESHOLD,
             "gender_imbalance_detected": gender_disparity > ImageBiasAnalyzer.GENDER_DISP_THRESHOLD,
-            "gender_critical_imbalance": gender_disparity > ImageBiasAnalyzer.GENDER_CRITICAL_THRESHOLD
+            "gender_critical_imbalance": gender_disparity > ImageBiasAnalyzer.GENDER_CRITICAL_THRESHOLD,
+            "label_source_counts": label_source_counts,
+            "detection_note": (
+                "Gender labels from demographic_groups are used when available. "
+                "Image-only fallback is conservative and may return 'unknown'."
+            ),
         }
     
     def analyze_skin_tone(
@@ -919,34 +919,93 @@ class ImageBiasAnalyzer:
         - Bias level classification (Low, Moderate, High, Critical)
         - Summary of critical, moderate, and minor issues
         """
-        # Simplified analysis: only evaluate race/ethnicity bias + basic representation
         representation_analysis = self.analyze_demographic_representation(
             images, demographic_groups
         )
         race_ethnicity_analysis = self.detect_race_ethnicity(images, demographic_groups)
-        
-        # Calculate individual bias score
+        gender_analysis = self.detect_gender_representation(images, demographic_groups)
+        age_group_analysis = self.detect_age_groups(images, demographic_groups)
+        skin_tone_analysis = self.analyze_skin_tone(images, demographic_groups)
+        pose_composition_analysis = self.analyze_pose_composition(images, demographic_groups)
+        background_context_analysis = self.analyze_background_context(images, demographic_groups)
+        clothing_accessories_analysis = self.analyze_clothing_accessories(images, demographic_groups)
+        emotion_expression_analysis = self.analyze_expression_emotion(images, demographic_groups)
+
         representation_bias_score = 1 - representation_analysis["demographic_parity_score"]
+        race_bias_score = float(race_ethnicity_analysis["race_bias_detected"])
+        gender_bias_score = float(gender_analysis["gender_imbalance_detected"])
+        age_bias_score = float(age_group_analysis["age_representation_bias_detected"])
+        skin_tone_bias_score = float(skin_tone_analysis["skin_tone_bias_detected"])
+        pose_bias_score = float(pose_composition_analysis["pose_bias_detected"])
+        background_bias_score = float(background_context_analysis["background_bias_detected"])
+        clothing_bias_score = float(clothing_accessories_analysis["clothing_bias_detected"])
+        emotion_bias_score = float(emotion_expression_analysis["emotion_bias_detected"])
+
         weights = ImageBiasAnalyzer.WEIGHTS
         overall_bias_score = (
             representation_bias_score * weights["representation_weight"] +
-            float(race_ethnicity_analysis["race_bias_detected"]) * weights["race_bias_weight"]
+            race_bias_score * weights["race_bias_weight"] +
+            gender_bias_score * weights["gender_bias_weight"] +
+            age_bias_score * weights["age_bias_weight"] +
+            skin_tone_bias_score * weights["skin_tone_bias_weight"] +
+            pose_bias_score * weights["pose_bias_weight"] +
+            background_bias_score * weights["background_bias_weight"] +
+            clothing_bias_score * weights["clothing_bias_weight"] +
+            emotion_bias_score * weights["emotion_bias_weight"]
         )
-        
+
+        bias_level = self._score_to_bias_level(overall_bias_score)
+        bias_summary = {
+            "critical_issues": float(race_ethnicity_analysis.get("race_critical_bias", False)) +
+                               float(representation_bias_score > 0.5) +
+                               float(gender_analysis.get("gender_critical_imbalance", False)),
+            "moderate_issues": age_bias_score + skin_tone_bias_score + float(race_ethnicity_analysis["race_bias_detected"]),
+            "minor_issues": pose_bias_score + background_bias_score + clothing_bias_score + emotion_bias_score,
+            "total_issues_detected": float(race_ethnicity_analysis["race_bias_detected"]) +
+                                      float(representation_bias_score > 0.5) +
+                                      gender_bias_score + age_bias_score + skin_tone_bias_score +
+                                      pose_bias_score + background_bias_score +
+                                      clothing_bias_score + emotion_bias_score
+        }
+
         result = {
+            "total_images_analyzed": len(images),
+            "total_demographic_groups": len(set(demographic_groups)),
+            "overall_image_bias_score": overall_bias_score,
+            "bias_level": bias_level,
+            "demographic_representation": representation_analysis,
+            "race_ethnicity_analysis": race_ethnicity_analysis,
+            "gender_analysis": gender_analysis,
+            "age_group_analysis": age_group_analysis,
+            "skin_tone_analysis": skin_tone_analysis,
+            "pose_composition_analysis": pose_composition_analysis,
+            "background_context_analysis": background_context_analysis,
+            "clothing_accessories_analysis": clothing_accessories_analysis,
+            "emotion_expression_analysis": emotion_expression_analysis,
+            "bias_summary": bias_summary,
+            "recommendations": self._generate_recommendations(
+                representation_analysis, race_ethnicity_analysis, gender_analysis
+            ),
             "analysis_metadata": {
                 "total_images_analyzed": len(images),
                 "total_demographic_groups": len(set(demographic_groups)),
                 "analysis_timestamp": str(np.datetime64('today')),
-                "config_version": "2.0"
+                "config_version": "2.1"
             },
             "dimensional_analysis": {
                 "demographic_representation": representation_analysis,
-                    "race_ethnicity_analysis": race_ethnicity_analysis
+                "race_ethnicity_analysis": race_ethnicity_analysis,
+                "gender_analysis": gender_analysis,
+                "age_group_analysis": age_group_analysis,
+                "skin_tone_analysis": skin_tone_analysis,
+                "pose_composition_analysis": pose_composition_analysis,
+                "background_context_analysis": background_context_analysis,
+                "clothing_accessories_analysis": clothing_accessories_analysis,
+                "emotion_expression_analysis": emotion_expression_analysis
             },
             "overall_assessment": {
                 "overall_image_bias_score": overall_bias_score,
-                "bias_level": self._score_to_bias_level(overall_bias_score),
+                "bias_level": bias_level,
                 "bias_score_thresholds": {
                     "low": ImageBiasAnalyzer.LOW_THRESHOLD,
                     "moderate": ImageBiasAnalyzer.MODERATE_THRESHOLD,
@@ -956,18 +1015,7 @@ class ImageBiasAnalyzer:
                 "active_weights": {
                     k: v for k, v in weights.items() if k.endswith("_weight")
                 }
-            },
-            "bias_summary": {
-                "critical_issues": float(race_ethnicity_analysis.get("race_critical_bias", False)) +
-                                   float(representation_bias_score > 0.5),
-                "moderate_issues": 0,
-                "minor_issues": 0,
-                "total_issues_detected": float(race_ethnicity_analysis["race_bias_detected"]) +
-                                          float(representation_bias_score > 0.5)
-            },
-            "recommendations": self._generate_recommendations(
-                representation_analysis, race_ethnicity_analysis
-            )
+            }
         }
         
         # Convert numpy types to Python native types for JSON serialization
@@ -977,8 +1025,8 @@ class ImageBiasAnalyzer:
         """Generate recommendations based on detected biases."""
         recommendations = []
         
-        # Only first two analyses are passed (representation, race)
         rep, race = analyses[0], analyses[1]
+        gender = analyses[2] if len(analyses) > 2 else {}
 
         if rep.get("imbalance_detected"):
             recommendations.append(
@@ -990,6 +1038,12 @@ class ImageBiasAnalyzer:
             recommendations.append(
                 "Racial/ethnic representation shows significant disparity. "
                 "Ensure diverse racial/ethnic representation in dataset collection."
+            )
+
+        if gender.get("gender_imbalance_detected"):
+            recommendations.append(
+                "Gender representation appears imbalanced. If labels are available, "
+                "pass explicit gender labels in demographic_groups for more reliable analysis."
             )
 
         if not recommendations:
