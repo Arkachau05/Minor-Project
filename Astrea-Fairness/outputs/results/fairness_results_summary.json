@@ -1,0 +1,45 @@
+{
+  "timestamp": "2026-04-26T01:06:58.583301",
+  "overall_fairness_score": 70.0,
+  "bias_level": "Moderate Bias",
+  "dataset_size": 8,
+  "fairness_metrics": {
+    "dp_diff": 0.75,
+    "dp_ratio": 0.25,
+    "eo_diff": 0.0,
+    "fpr_diff": 0.0,
+    "equalized_odds": 0.0,
+    "pp_diff": 0.0,
+    "theil_index": 0.3616,
+    "atkinson_index": 0.375
+  },
+  "group_distribution": {
+    "Male": 4,
+    "Female": 4
+  },
+  "positive_rates": {
+    "Female": 0.25,
+    "Male": 1.0
+  },
+  "classification_metrics": [
+    {
+      "group": "Male",
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    },
+    {
+      "group": "Female",
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1_score": 1.0
+    }
+  ],
+  "key_findings": {
+    "fairness_concern": "CRITICAL - Severe bias requiring urgent mitigation measures",
+    "business_impact": "Impact assessment unavailable",
+    "recommendation_priority": "HIGH"
+  }
+}
